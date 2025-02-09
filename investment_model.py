@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from state_tax import StateTaxManager
+from scipy.stats import norm
 
 class InvestmentComparator:
     def __init__(self):
@@ -40,7 +42,7 @@ class InvestmentComparator:
         self.passive_dividend_yield = 0.015  # SPY股息率
         self.active_dividend_yield = 0.02   # 主动投资股息率
         
-        self.initial_investment = 10000  # 每年投资金额（税前）
+        self.initial_investment = 10000  # 每年投资金额（税后）
         
         self.real_salary_growth = (1 + self.salary_growth) / (1 + self.inflation) - 1
         self.real_return_401k = (1 + self.r_401k) / (1 + self.inflation) - 1
@@ -66,11 +68,35 @@ class InvestmentComparator:
         # Add employer match parameters
         self.employer_match = 0.03  # 3% default match
         self.match_limit = 0.06    # Up to 6% of salary
+        
+        # Add state tax parameters
+        self.state_tax = 0.05  # Default 5% state income tax
+        self.state_cg_tax = 0.05  # Default 5% state capital gains tax
+        
+        # Add state tax manager
+        self.state_manager = StateTaxManager()
+        self.selected_state = "California"  # Default state
+        
+        # Add market regime parameters
+        self.regime_params = {
+            'bull': {
+                'mean_return': 0.15,  # 15% annual return in bull markets
+                'std_dev': 0.12      # 12% volatility
+            },
+            'bear': {
+                'mean_return': -0.10,  # -10% annual return in bear markets
+                'std_dev': 0.25       # 25% volatility
+            },
+            'crash': {
+                'mean_return': -0.30,  # -30% annual return during crashes
+                'std_dev': 0.40       # 40% volatility
+            }
+        }
     
     def calculate_investment_years(self):
         """Recalculate investment years when age changes"""
         return self.retirement_age - self.current_age
-
+    
     def calculate_marginal_tax(self, income):
         """计算累进所得税"""
         total_tax = 0
@@ -86,115 +112,54 @@ class InvestmentComparator:
         return total_tax / income  # 返回有效税率
 
     def calculate_roth_401k_returns(self):
-        """Calculate combined Roth + employer match returns"""
-        roth_value = 0  # After-tax Roth portion
-        trad_value = 0  # Pre-tax employer match portion
-        annual_values = []
-        total_contributions = 0
-        total_employer_match = 0
-        investment_years = self.calculate_investment_years()
+        """Calculate both deterministic and probabilistic Roth 401k returns"""
+        # Get deterministic results
+        det_value, det_annual = self.get_deterministic_results(is_roth=True)
         
-        print("\nDEBUG: Roth 401k Calculation")
-        for year in range(investment_years):
-            # Calculate real salary growth (adjusted for inflation)
-            real_salary_growth = (1 + self.salary_growth) / (1 + self.inflation) - 1
-            
-            # Calculate inflation-adjusted contribution
-            real_contribution = self.initial_investment * (1 + real_salary_growth)**year
-            pre_tax_contribution = real_contribution * (1 + self.inflation)**year
-            
-            # Calculate projected income with real growth
-            projected_income = self.annual_income * (1 + real_salary_growth)**year
-            total_income = projected_income * (1 + self.inflation)**year
-            
-            # Calculate true marginal tax on this contribution
-            marginal_tax = self.calculate_true_marginal_tax(total_income, pre_tax_contribution)
-            tax_impact = pre_tax_contribution * marginal_tax
-            
-            # Calculate employer match (handle zero case)
-            match_eligible_amount = min(
-                pre_tax_contribution,
-                total_income * self.match_limit
-            )
-            employer_contribution = match_eligible_amount * self.employer_match
-            total_employer_match += employer_contribution
-            
-            # Full pre-tax amount goes into Roth
-            roth_contribution = pre_tax_contribution
-            total_contributions += roth_contribution
-            
-            # Grow both portions separately
-            old_roth = roth_value
-            old_trad = trad_value
-            
-            # Handle zero fees correctly
-            growth_rate = 1 + self.r_401k - (self.f_401k if self.f_401k is not None else 0)
-            
-            # Grow Roth portion (tax-free)
-            roth_value = (roth_value + roth_contribution) * growth_rate
-            
-            # Grow employer match portion (pre-tax)
-            trad_value = (trad_value + employer_contribution) * growth_rate
-            
-            if year < 3 or year > investment_years - 3:
-                print(f"Year {year}:")
-                print(f"  Nominal Income: ${total_income:,.2f}")
-                print(f"  Real Income: ${projected_income:,.2f}")
-                print(f"  Nominal Contribution: ${pre_tax_contribution:,.2f}")
-                print(f"  Real Contribution: ${real_contribution:,.2f}")
-                print(f"  Active Trading: {self.active_trading_freq*100:.1f}% turnover")
-                print(f"  True Marginal Tax Rate: {marginal_tax:.1%}")
-                print(f"  Your Contribution: ${roth_contribution:,.2f}")
-                if self.employer_match > 0:
-                    print(f"  Employer Match: ${employer_contribution:,.2f} ({self.employer_match*100:.0f}% up to {self.match_limit*100:.0f}%)")
-                print(f"  Growth Rate: {growth_rate:.3%}")
-                print(f"  Your Account Growth: ${roth_value - old_roth - roth_contribution:,.2f}")
-                if self.employer_match > 0:
-                    print(f"  Employer Account Growth: ${trad_value - old_trad - employer_contribution:,.2f}")
-                print(f"  Your Account Value: ${roth_value:,.2f}")
-                if self.employer_match > 0:
-                    print(f"  Employer Account Value: ${trad_value:,.2f}")
-                print(f"  Combined Value: ${roth_value + trad_value:,.2f}")
-            
-            # Calculate real value (inflation-adjusted)
-            real_value = (roth_value + trad_value) / (1 + self.inflation)**(year + 1)
-            annual_values.append(real_value)
+        # Get probabilistic results
+        prob_value, prob_trajectory, confidence_bounds = self.run_monte_carlo_simulation(is_roth=True)
         
-        # Apply retirement tax to traditional portion (only if there is employer match)
-        final_real_value = roth_value  # Start with Roth portion
-        if trad_value > 0:  # Only calculate tax if there's employer match
-            retirement_tax = self.calculate_true_marginal_tax(
-                total_income * (1 + self.salary_growth)**investment_years,
-                trad_value
-            )
-            after_tax_trad = trad_value * (1 - retirement_tax)
-            final_real_value += after_tax_trad
-            
-            print(f"\nRetirement Analysis:")
-            print(f"  Total Roth Value: ${roth_value:,.2f}")
-            print(f"  Total Traditional Value: ${trad_value:,.2f}")
-            print(f"  Tax on Traditional: ${trad_value * retirement_tax:,.2f}")
-            print(f"  After-tax Traditional: ${after_tax_trad:,.2f}")
-            print(f"  Final Combined Value: ${roth_value + after_tax_trad:,.2f}")
-            print(f"  Total Employer Match: ${total_employer_match:,.2f}")
+        total_contributions = sum([self.initial_investment * (1 + self.salary_growth)**year 
+                                 for year in range(self.calculate_investment_years())])
         
-        final_real_value = final_real_value / (1 + self.inflation)**investment_years
-        return final_real_value, annual_values, total_contributions
+        return det_value, det_annual, total_contributions, (prob_trajectory, confidence_bounds)
 
-    def calculate_true_marginal_tax(self, income, contribution, year=0):
-        """Calculate true marginal tax rate on contribution, adjusted for future growth"""
-        # Project income growth
-        projected_income = income * (1 + self.salary_growth)**year
+    def calculate_self_investment_returns(self):
+        """Calculate both deterministic and probabilistic self-managed returns"""
+        # Get deterministic results
+        det_value, det_annual = self.get_deterministic_results(is_roth=False)
         
-        # Calculate tax without and with contribution
-        tax_without = self.calculate_total_tax(projected_income)
-        tax_with = self.calculate_total_tax(projected_income + contribution)
+        # Get probabilistic results
+        prob_value, prob_trajectory, confidence_bounds = self.run_monte_carlo_simulation(is_roth=False)
+        
+        total_contributions = sum([self.initial_investment * (1 + self.salary_growth)**year 
+                                 for year in range(self.calculate_investment_years())])
+        
+        return det_value, det_annual, total_contributions, (prob_trajectory, confidence_bounds)
+
+    def calculate_true_marginal_tax(self, income, contribution=None):
+        """Calculate true marginal tax rate on additional income"""
+        if contribution is None:
+            contribution = income * 0.01  # Use 1% for marginal calculation
+        
+        # Calculate federal tax at both income levels
+        fed_tax_without = self.calculate_total_tax(income, include_state=False)
+        fed_tax_with = self.calculate_total_tax(income + contribution, include_state=False)
         
         # True marginal rate is the difference
-        return (tax_with - tax_without) / contribution
+        fed_marginal = (fed_tax_with - fed_tax_without) / contribution
+        
+        # Add state marginal rate
+        state_marginal = self.state_manager.get_state_tax_rate(
+            self.selected_state,
+            income + contribution
+        )
+        
+        return fed_marginal + state_marginal
 
-    def calculate_total_tax(self, income):
-        """Calculate total tax (not rate) for a given income"""
+    def calculate_total_tax(self, income, include_state=True):
+        """Calculate total tax including optional state tax"""
+        # Federal tax calculation
         total_tax = 0
         remaining_income = income
         
@@ -204,6 +169,10 @@ class InvestmentComparator:
             taxable_amount = min(upper - lower, remaining_income)
             total_tax += taxable_amount * rate
             remaining_income -= taxable_amount
+        
+        # Add state tax if requested
+        if include_state:
+            total_tax += income * self.state_tax
         
         return total_tax
 
@@ -217,136 +186,6 @@ class InvestmentComparator:
             self.active_ratio * active_return
         )
         return portfolio_return
-
-    def calculate_self_investment_returns(self, liquidation_percent=100):
-        """Calculate self-managed returns with proper tax treatment"""
-        passive_value = 0
-        active_value = 0
-        total_contributions = 0
-        annual_values = []
-        
-        # Track cost basis and unrealized gains
-        passive_cost_basis = 0
-        active_cost_basis = 0
-        passive_unrealized_gains = 0
-        active_unrealized_gains = 0
-        
-        print("\nDEBUG: Self-Managed Calculation")
-        print(f"DEBUG: Initial passive_ratio = {self.passive_ratio:.1%}, active_ratio = {1 - self.passive_ratio:.1%}")
-        print(f"DEBUG: Active trading frequency = {self.active_trading_freq:.1%}/year")
-        
-        for year in range(self.calculate_investment_years()):
-            # Calculate real salary growth (adjusted for inflation)
-            real_salary_growth = (1 + self.salary_growth) / (1 + self.inflation) - 1
-            
-            # Calculate inflation-adjusted contribution
-            real_contribution = self.initial_investment * (1 + real_salary_growth)**year
-            pre_tax_contribution = real_contribution * (1 + self.inflation)**year
-            
-            # Calculate projected income with real growth
-            projected_income = self.annual_income * (1 + real_salary_growth)**year
-            total_income = projected_income * (1 + self.inflation)**year
-            
-            # Calculate true marginal tax based on projected income
-            marginal_tax = self.calculate_true_marginal_tax(projected_income, pre_tax_contribution, year)
-            tax_impact = pre_tax_contribution * marginal_tax
-            
-            # Only invest after-tax amount
-            contribution = pre_tax_contribution * (1 - marginal_tax)
-            total_contributions += contribution
-            
-            # Split between passive and active
-            passive_contribution = contribution * self.passive_ratio
-            active_contribution = contribution * (1 - self.passive_ratio)
-            
-            # Update cost basis with after-tax contributions
-            passive_cost_basis += passive_contribution
-            active_cost_basis += active_contribution
-            
-            old_passive = passive_value
-            old_active = active_value
-
-            # Passive portion (buy and hold)
-            if passive_value > 0 or passive_contribution > 0:
-                passive_value = (passive_value + passive_contribution) * (1 + self.r_passive - self.f_passive)
-                passive_growth = passive_value - (old_passive + passive_contribution)
-                passive_unrealized_gains += passive_growth
-                
-                # Only dividends are taxed annually
-                passive_dividend = passive_value * self.passive_dividend_yield
-                passive_dividend_tax = passive_dividend * self.dividend_tax
-                passive_value = passive_value - passive_dividend_tax
-            else:
-                passive_value = passive_contribution
-
-            # Active portion (with trading) - only if active ratio > 0
-            if self.active_ratio > 0:
-                if active_value > 0 or active_contribution > 0:
-                    active_value = (active_value + active_contribution) * (1 + self.r_active - self.f_active)
-                    active_growth = active_value - (old_active + active_contribution)
-                    
-                    # Tax realized gains from trading
-                    realized_gains = active_value * self.active_trading_freq
-                    unrealized_gains = active_growth - realized_gains
-                    active_unrealized_gains += unrealized_gains
-                    
-                    realized_gains_tax = realized_gains * (
-                        0.6 * self.st_capital_gains_tax + 
-                        0.4 * self.lt_capital_gains_tax
-                    )
-                    
-                    active_dividend = active_value * self.active_dividend_yield
-                    active_dividend_tax = active_dividend * self.dividend_tax
-                    
-                    active_value = active_value - realized_gains_tax - active_dividend_tax
-                else:
-                    active_value = active_contribution
-
-            total_value = passive_value + active_value
-
-            if year < 3 or year > self.calculate_investment_years() - 3:
-                print(f"\nYear {year}:")
-                print(f"  Nominal Income: ${total_income:,.2f}")
-                print(f"  Real Income: ${projected_income:,.2f}")
-                print(f"  Nominal Contribution: ${pre_tax_contribution:,.2f}")
-                print(f"  Real Contribution: ${real_contribution:,.2f}")
-                print(f"  Active Trading: {self.active_trading_freq*100:.1f}% turnover")
-                print(f"  True Marginal Tax Rate: {marginal_tax:.1%}")
-                print(f"  Pre-tax Amount: ${pre_tax_contribution:,.2f}")
-                print(f"  Tax Paid: ${tax_impact:,.2f}")
-                print(f"  After-tax Investment: ${contribution:,.2f}")
-                print(f"  Passive Growth: ${passive_growth:,.2f}")
-                print(f"  Active Growth: ${active_growth:,.2f}")
-                print(f"  Dividends: ${passive_dividend + active_dividend:,.2f}")
-                print(f"  Dividend Tax: ${passive_dividend_tax + active_dividend_tax:,.2f}")
-                print(f"  Realized Gains Tax: ${realized_gains_tax:,.2f}")
-                print(f"  Total Value: ${total_value:,.2f}")
-
-            real_value = total_value / (1 + self.inflation)**(year + 1)
-            annual_values.append(real_value)
-
-        # Calculate projected retirement income for capital gains tax
-        final_income = self.annual_income * (1 + self.salary_growth)**(self.calculate_investment_years())
-        retirement_cg_tax = self.projected_capital_gains_tax(final_income)
-        
-        # Apply final liquidation tax using projected rate
-        if passive_unrealized_gains + active_unrealized_gains > 0:
-            liquidation_ratio = liquidation_percent / 100
-            taxable_gains = (passive_unrealized_gains + active_unrealized_gains) * liquidation_ratio
-            final_tax = taxable_gains * retirement_cg_tax
-            total_value -= final_tax
-            
-            print(f"\nFinal Liquidation at Retirement ({liquidation_percent:.0f}%):")
-            print(f"  Projected Retirement Income: ${final_income:,.2f}")
-            print(f"  Projected Capital Gains Rate: {retirement_cg_tax:.1%}")
-            print(f"  Total Unrealized Gains: ${passive_unrealized_gains + active_unrealized_gains:,.2f}")
-            print(f"  Taxable Gains: ${taxable_gains:,.2f}")
-            print(f"  Capital Gains Tax: ${final_tax:,.2f}")
-            print(f"  Final After-tax Value: ${total_value:,.2f}")
-            
-            real_value = total_value / (1 + self.inflation)**(self.calculate_investment_years())
-
-        return real_value, annual_values, total_contributions
 
     def sensitivity_analysis(self):
         """Extended sensitivity analysis with realistic scenarios"""
@@ -372,7 +211,7 @@ class InvestmentComparator:
         plt.ylabel('Final Real Value ($)')
         plt.grid(True)
         plt.legend()
-        
+
         # 2. 主动交易频率的敏感性
         plt.subplot(2, 2, 2)
         active_freqs = [0.1, 0.2, 0.3, 0.4, 0.5]
@@ -420,199 +259,199 @@ class InvestmentComparator:
         plt.tight_layout()
         plt.show()
 
-    def calculate_returns_with_volatility(self, is_roth=False):
-        """Monte Carlo with fat-tailed distributions for more realistic modeling"""
-        num_simulations = 1000
-        simulation_results = []
-        annual_values_all = []
+    def simulate_market_cycles(self, years):
+        """Generate market cycle data with Markov Chain transitions"""
+        cycles = []
+        current_year = 0
         
+        # Market regime transition probabilities
+        transition_matrix = {
+            'bull': {'bull': 0.8, 'bear': 0.15, 'crash': 0.05},
+            'bear': {'bull': 0.3, 'bear': 0.6, 'crash': 0.1},
+            'crash': {'bull': 0.5, 'bear': 0.4, 'crash': 0.1}
+        }
+        
+        # Start in bull market (most common starting point)
+        current_regime = 'bull'
+        
+        while current_year < years:
+            duration = None
+            if current_regime == 'bull':
+                duration = np.random.randint(24, 60) / 12  # 2-5 years
+            elif current_regime == 'bear':
+                duration = np.random.randint(12, 24) / 12  # 1-2 years
+            else:  # crash
+                duration = np.random.randint(6, 12) / 12  # 6-12 months
+            
+            # Adjust duration if it would exceed simulation period
+            if current_year + duration > years:
+                duration = years - current_year
+            
+            cycles.append({
+                'regime': current_regime,
+                'duration': duration,
+                'start_year': current_year,
+                'params': self.regime_params[current_regime]
+            })
+            
+            current_year += duration
+            
+            # Determine next regime
+            next_probs = transition_matrix[current_regime]
+            current_regime = np.random.choice(
+                list(next_probs.keys()),
+                p=list(next_probs.values())
+            )
+        
+        return cycles
+
+    def simulate_investment_returns(self, is_roth=False, num_simulations=500, market_cycles=None):
+        """Simulate investment returns using provided or new market cycles"""
         investment_years = self.calculate_investment_years()
+        all_trajectories = []
         
-        # Use Student's t-distribution for fat tails
-        degrees_of_freedom = 5  # Lower = fatter tails
+        print("\nSimulating investment trajectories...")
         
-        for _ in range(num_simulations):
+        # Generate market cycles once if not provided
+        if market_cycles is None:
+            market_cycles = self.simulate_market_cycles(investment_years)
+        
+        for sim in range(num_simulations):
             total_value = 0
             annual_values = []
             
-            # Generate returns from t-distribution
-            if is_roth:
-                returns = (np.random.standard_t(degrees_of_freedom, investment_years) * 
-                          self.passive_volatility + self.r_401k)
-            else:
-                passive_returns = (np.random.standard_t(degrees_of_freedom, investment_years) * 
-                                 self.passive_volatility + self.r_passive)
-                active_returns = (np.random.standard_t(degrees_of_freedom, investment_years) * 
-                                self.active_volatility + self.r_active)
+            for year in range(investment_years):
+                # Find applicable market cycle
+                cycle = next(c for c in market_cycles if 
+                            c['start_year'] <= year < c['start_year'] + c['duration'])
+                regime_data = cycle['params']
                 
-                for year in range(investment_years):
-                    # 计算当年供款
-                    contribution = self.initial_investment * (1 + self.salary_growth)**year
+                # Generate monthly returns
+                if is_roth:
+                    monthly_returns = norm.rvs(
+                        loc=regime_data['mean_return']/12,
+                        scale=regime_data['std_dev']/np.sqrt(12),
+                        size=12
+                    )
+                else:
+                    # Generate correlated returns for passive/active
+                    rho = self.correlation
+                    cov_matrix = np.array([[1, rho], [rho, 1]])
+                    L = np.linalg.cholesky(cov_matrix)
                     
-                    # 投资组合增长
-                    if total_value > 0:
-                        passive_growth = total_value * self.passive_ratio * passive_returns[year]
-                        active_growth = total_value * self.active_ratio * active_returns[year]
-                        total_growth = passive_growth + active_growth
+                    uncorrelated = np.random.normal(size=(2, 12))
+                    correlated = np.dot(L, uncorrelated)
+                    
+                    passive_returns = (
+                        correlated[0] * regime_data['std_dev']/np.sqrt(12) +
+                        regime_data['mean_return']/12
+                    )
+                    
+                    active_premium = (self.r_active - self.r_passive)/12
+                    active_returns = (
+                        correlated[1] * regime_data['std_dev']*1.5/np.sqrt(12) +
+                        regime_data['mean_return']/12 +
+                        active_premium
+                    )
+                
+                # Process monthly returns
+                for month in range(12):
+                    monthly_contribution = (self.initial_investment * 
+                                         (1 + self.salary_growth)**year) / 12
+                    
+                    if is_roth:
+                        if total_value > 0:
+                            total_value *= (1 + monthly_returns[month] - self.f_401k/12)
+                        total_value += monthly_contribution
                         
-                        # 考虑费用
-                        total_value = (total_value + total_growth) * (1 - self.f_passive * self.passive_ratio - self.f_active * self.active_ratio)
-                    
-                    total_value += contribution
-                    annual_values.append(total_value)
+                        match = self.calculate_employer_match(
+                            monthly_contribution,
+                            self.annual_income * (1 + self.salary_growth)**year / 12
+                        )
+                        if match > 0:
+                            total_value += match * (1 + monthly_returns[month] - self.f_401k/12)
+                    else:
+                        if total_value > 0:
+                            passive_value = total_value * self.passive_ratio
+                            active_value = total_value * self.active_ratio
+                            
+                            passive_growth = passive_value * (1 + passive_returns[month] - self.f_passive/12)
+                            active_growth = active_value * (1 + active_returns[month] - self.f_active/12)
+                            
+                            tax_impact = (
+                                self.calculate_investment_taxes(passive_value, passive_returns[month], False) +
+                                self.calculate_investment_taxes(active_value, active_returns[month], True)
+                            ) / 12
+                            
+                            total_value = passive_growth + active_growth - tax_impact
+                        
+                        total_value += monthly_contribution
+                
+                # Store annual value
+                real_value = total_value / (1 + self.inflation)**(year + 1)
+                annual_values.append(real_value)
             
-            # 考虑通货膨胀
-            real_final_value = total_value / (1 + self.inflation)**investment_years
-            simulation_results.append(real_final_value)
-            annual_values_all.append(annual_values)
+            all_trajectories.append(annual_values)
+            if sim % 100 == 0:
+                print(f"Completed {sim}/{num_simulations} simulations")
         
-        mean_final_value = np.mean(simulation_results)
-        percentile_5 = np.percentile(simulation_results, 5)
-        percentile_95 = np.percentile(simulation_results, 95)
-        
-        return mean_final_value, annual_values_all, simulation_results
+        return self.process_simulation_results(all_trajectories)
 
-    def calculate_risk_metrics(self):
-        """计算综合风险指标"""
-        mean_value, _, returns = self.calculate_returns_with_volatility()
+    def process_simulation_results(self, trajectories):
+        """Process and summarize simulation results"""
+        trajectories = np.array(trajectories)
+        mean_trajectory = np.mean(trajectories, axis=0)
+        std_trajectory = np.std(trajectories, axis=0)
         
-        # 计算年化收益率
-        years = self.investment_years
-        annual_returns = [(r / self.initial_investment)**(1/years) - 1 for r in returns]
+        ci_lower = np.percentile(trajectories, 5, axis=0)
+        ci_upper = np.percentile(trajectories, 95, axis=0)
         
-        # 计算风险指标
-        returns_array = np.array(annual_returns)
-        mean_return = np.mean(returns_array)
-        std_dev = np.std(returns_array)
-        negative_returns = returns_array[returns_array < 0]
+        print("\nSimulation Statistics:")
+        print(f"Final Value (mean): ${mean_trajectory[-1]:,.2f}")
+        print(f"Standard Deviation: ${std_trajectory[-1]:,.2f}")
+        print(f"90% Confidence Interval: ${ci_lower[-1]:,.2f} to ${ci_upper[-1]:,.2f}")
         
-        metrics = {
-            'mean_return': mean_return,
-            'volatility': std_dev,
-            'sharpe_ratio': (mean_return - self.risk_free_rate) / std_dev if std_dev != 0 else 0,
-            'sortino_ratio': (mean_return - self.risk_free_rate) / np.std(negative_returns) if len(negative_returns) > 0 else 0,
-            'max_drawdown': abs(np.min(returns_array)) if len(returns_array) > 0 else 0,
-            'var_95': np.percentile(returns_array, 5)
-        }
-        
-        return metrics
-
-    def calculate_rebalancing_costs(self, passive_value, active_value):
-        """Calculates rebalancing tax when asset allocation drifts beyond threshold"""
-        total_value = passive_value + active_value
-        current_passive_ratio = passive_value / total_value
-        target_passive_ratio = self.passive_ratio
-
-        if abs(current_passive_ratio - target_passive_ratio) > 0.05:  # 5% drift threshold
-            rebalancing_amount = abs(target_passive_ratio - current_passive_ratio) * total_value
-            rebalancing_tax = rebalancing_amount * self.lt_capital_gains_tax  # Assume long-term
-            return rebalancing_tax
-        return 0
-
-    def simulate_market_cycles(self):
-        """改进的市场周期模拟，考虑通货膨胀和税收影响"""
-        investment_years = self.calculate_investment_years()
-        
-        market_cycles = {
-            'bull': {'prob': 0.6, 'return': 0.15, 'volatility': 0.12},
-            'bear': {'prob': 0.3, 'return': -0.10, 'volatility': 0.25},
-            'crash': {'prob': 0.1, 'return': -0.30, 'volatility': 0.40}
-        }
-        
-        cycle_returns = []
-        real_returns = []
-        after_tax_returns = []
-        
-        for year in range(investment_years):
-            # 选择市场周期
-            cycles = list(market_cycles.keys())
-            probabilities = [market_cycles[c]['prob'] for c in cycles]
-            cycle = np.random.choice(cycles, p=probabilities)
-            
-            # 生成名义回报
-            nominal_return = np.random.normal(
-                market_cycles[cycle]['return'],
-                market_cycles[cycle]['volatility']
-            )
-            
-            # 计算实际回报（考虑通货膨胀）
-            real_return = (1 + nominal_return) / (1 + self.inflation) - 1
-            
-            # 计算税后回报（简化处理，假设50%收益需要缴税）
-            if nominal_return > 0:
-                taxable_portion = nominal_return * 0.5
-                tax = taxable_portion * self.lt_capital_gains_tax
-                after_tax_return = nominal_return - tax
-            else:
-                after_tax_return = nominal_return
-            
-            cycle_returns.append(nominal_return)
-            real_returns.append(real_return)
-            after_tax_returns.append(after_tax_return)
-        
-        return {
-            'nominal': cycle_returns,
-            'real': real_returns,
-            'after_tax': after_tax_returns
-        }
-
-    def simulate_withdrawal_phase(self):
-        """Simulates retirement withdrawal and checks portfolio longevity."""
-        withdrawal_rates = [0.03, 0.04, 0.05]  # Different withdrawal rates
-        success_rates = {}
-    
-        for rate in withdrawal_rates:
-            successes = 0
-            for _ in range(1000):  # 1000 Monte Carlo simulations
-                portfolio = self.calculate_self_investment_returns()[0]
-                years_sustained = 0
-                withdrawal = portfolio * rate  # Initial withdrawal
-
-                while portfolio > 0 and years_sustained < 30:
-                    portfolio -= withdrawal  # Withdraw funds
-                    portfolio *= (1 + np.random.normal(self.calculate_portfolio_return(), 0.12))  # Random return
-                    withdrawal *= (1 + self.inflation)  # Adjust for inflation
-                    years_sustained += 1
-
-                if years_sustained >= 30:
-                    successes += 1
-            
-            success_rates[rate] = successes / 1000  # Probability of success
-        
-        return success_rates
+        return mean_trajectory[-1], mean_trajectory, trajectories
 
     def print_comprehensive_analysis(self):
-        """打印综合分析结果"""
-        print("\n=== 综合投资分析 ===")
+        """Print comprehensive analysis using consistent market cycles"""
+        print("\n=== Comprehensive Investment Analysis ===")
         
-        # 基础回报分析
-        roth_value, _, roth_contributions = self.calculate_roth_401k_returns()
-        self_value, _, self_contributions = self.calculate_self_investment_returns()
+        # Generate market cycles once
+        investment_years = self.calculate_investment_years()
+        market_cycles = self.simulate_market_cycles(investment_years)
         
-        # 风险指标
-        risk_metrics = self.calculate_risk_metrics()
+        # Analyze market cycles
+        print("\nMarket Cycle Analysis:")
+        regime_counts = {'bull': 0, 'bear': 0, 'crash': 0}
+        regime_durations = {'bull': [], 'bear': [], 'crash': []}
         
-        # 退休提取分析
-        withdrawal_success = self.simulate_withdrawal_phase()
+        for cycle in market_cycles:
+            regime = cycle['regime']
+            duration = cycle['duration']
+            regime_counts[regime] += 1
+            regime_durations[regime].append(duration)
         
-        print("\n1. 基础回报分析:")
-        print(f"Roth 401k 最终价值: ${roth_value:,.2f}")
-        print(f"自主投资最终价值: ${self_value:,.2f}")
-        print(f"相对收益差异: {((self_value/roth_value)-1)*100:.1f}%")
-        print(f"Roth 401k 总供款: ${roth_contributions:,.2f}")
-        print(f"自主投资总供款: ${self_contributions:,.2f}")
+        print("\nMarket Regime Distribution:")
+        total_cycles = sum(regime_counts.values())
+        for regime, count in regime_counts.items():
+            avg_duration = np.mean(regime_durations[regime])
+            print(f"{regime.title()} Markets:")
+            print(f"  Frequency: {count/total_cycles:.1%}")
+            print(f"  Avg Duration: {avg_duration:.1f} years")
         
-        print("\n2. 风险指标:")
-        print(f"年化平均回报率: {risk_metrics['mean_return']*100:.1f}%")
-        print(f"年化波动率: {risk_metrics['volatility']*100:.1f}%")
-        print(f"夏普比率: {risk_metrics['sharpe_ratio']:.2f}")
-        print(f"索提诺比率: {risk_metrics['sortino_ratio']:.2f}")
-        print(f"最大回撤: {risk_metrics['max_drawdown']*100:.1f}%")
-        print(f"95%置信区间下限年化回报: {risk_metrics['var_95']*100:.1f}%")
+        # Run investment simulations using the same market cycles
+        print("\nRunning Investment Simulations...")
+        roth_value, roth_annual, _ = self.simulate_investment_returns(
+            is_roth=True, market_cycles=market_cycles)
+        self_value, self_annual, _ = self.simulate_investment_returns(
+            is_roth=False, market_cycles=market_cycles)
         
-        print("\n3. 退休提取分析:")
-        for rate, success in withdrawal_success.items():
-            print(f"{rate*100}%提取率的成功概率: {success*100:.1f}%")
+        # Print results
+        print("\nFinal Portfolio Values (Inflation-Adjusted):")
+        print(f"Roth 401k: ${roth_value:,.2f}")
+        print(f"Self-Managed: ${self_value:,.2f}")
+        print(f"Difference: {((self_value/roth_value)-1)*100:.1f}%")
 
     def calculate_effective_tax_rate(self, value, gains, trading_freq, is_active=False):
         """计算投资的实际税负"""
@@ -625,27 +464,307 @@ class InvestmentComparator:
         else:
             return trading_gains * self.lt_capital_gains_tax
 
-    def projected_capital_gains_tax(self, retirement_income):
-        """Estimate capital gains tax rate at retirement based on projected income"""
-        # Basic capital gains brackets (2024)
+    def projected_capital_gains_tax(self, retirement_income, is_long_term=True):
+        """Calculate capital gains tax rate based on income level"""
+        if not is_long_term:
+            # Short-term gains are taxed as ordinary income
+            return self.calculate_true_marginal_tax(retirement_income)
+        
+        # 2025 Long-term capital gains brackets (single filer)
         cg_brackets = [
-            (0, 44625, 0.0),       # 0% bracket
-            (44626, 492300, 0.15), # 15% bracket
-            (492301, float('inf'), 0.20)  # 20% bracket
+            (0, 48350, 0.0),        # 0% bracket
+            (48351, 533400, 0.15),  # 15% bracket
+            (533401, float('inf'), 0.20)  # 20% bracket
         ]
         
-        # Add 3.8% NIIT for high incomes
-        niit_threshold = 200000
-        base_rate = 0.0
-        
         # Find applicable capital gains rate
+        base_rate = 0.0
         for lower, upper, rate in cg_brackets:
             if retirement_income > lower and retirement_income <= upper:
                 base_rate = rate
                 break
+            elif retirement_income > upper:
+                base_rate = rate
         
-        # Add NIIT if applicable
+        # Add 3.8% NIIT for high incomes (threshold adjusted for 2025)
+        niit_threshold = 200000  # Single filer threshold
         if retirement_income > niit_threshold:
             base_rate += 0.038
         
-        return base_rate
+        # Add state capital gains tax
+        state_rate = self.state_manager.get_state_tax_rate(
+            self.selected_state,
+            retirement_income
+        )
+        
+        return base_rate + state_rate
+
+    def calculate_capital_gains_tax(self, gains, income, is_long_term=True):
+        """Calculate capital gains tax using progressive brackets"""
+        if not is_long_term:
+            # Short-term gains are taxed as ordinary income
+            return gains * self.calculate_true_marginal_tax(income + gains)
+        
+        # 2025 Long-term capital gains brackets (single filer)
+        total_tax = 0
+        remaining_gains = gains
+        total_income = income + gains
+        
+        cg_brackets = [
+            (0, 48350, 0.0),        # 0% bracket
+            (48351, 533400, 0.15),  # 15% bracket
+            (533401, float('inf'), 0.20)  # 20% bracket
+        ]
+        
+        # Calculate tax for each bracket
+        for lower, upper, rate in cg_brackets:
+            if total_income > lower:
+                # Calculate taxable amount in this bracket
+                bracket_income = min(total_income, upper) - lower
+                taxable_gains = min(remaining_gains, bracket_income)
+                if taxable_gains > 0:
+                    total_tax += taxable_gains * rate
+                    remaining_gains -= taxable_gains
+            
+            if remaining_gains <= 0:
+                break
+        
+        # Add NIIT for high incomes
+        if total_income > 200000:  # 2025 threshold
+            total_tax += gains * 0.038
+        
+        # Add state tax
+        state_rate = self.state_manager.get_state_tax_rate(
+            self.selected_state,
+            total_income
+        )
+        total_tax += gains * state_rate
+        
+        return total_tax
+
+    def calculate_employer_match(self, contribution, salary):
+        """Calculate employer match with proper limits"""
+        # Calculate maximum matchable amount (e.g., 6% of salary)
+        max_matchable = salary * self.match_limit
+        
+        # Calculate match on the lesser of:
+        # 1. Employee contribution
+        # 2. Maximum matchable amount
+        matchable_amount = min(contribution, max_matchable)
+        
+        # Apply employer match percentage (e.g., 3%)
+        return matchable_amount * self.employer_match
+
+    def calculate_investment_taxes(self, value, gains, is_active=False):
+        """Calculate investment taxes with proper treatment of gains"""
+        total_tax = 0
+        
+        # Handle dividends
+        if is_active:
+            dividend_yield = self.active_dividend_yield
+        else:
+            dividend_yield = self.passive_dividend_yield
+        
+        dividend_income = value * dividend_yield
+        dividend_tax_rate = self.projected_capital_gains_tax(
+            self.annual_income + dividend_income,
+            is_long_term=True  # Qualified dividends
+        )
+        total_tax += dividend_income * dividend_tax_rate
+        
+        # Handle realized gains
+        if is_active:
+            trading_freq = self.active_trading_freq
+            # 60% short-term, 40% long-term for active trading
+            realized_gains = value * trading_freq * gains
+            st_gains = realized_gains * 0.60
+            lt_gains = realized_gains * 0.40
+            
+            # Calculate tax rates based on income + realized gains
+            total_income = self.annual_income + st_gains + lt_gains
+            st_tax_rate = self.projected_capital_gains_tax(total_income, is_long_term=False)
+            lt_tax_rate = self.projected_capital_gains_tax(total_income, is_long_term=True)
+            
+            total_tax += (st_gains * st_tax_rate + lt_gains * lt_tax_rate)
+        else:
+            # Passive investments: mostly long-term gains
+            trading_freq = self.passive_trading_freq
+            realized_gains = value * trading_freq * gains
+            lt_tax_rate = self.projected_capital_gains_tax(
+                self.annual_income + realized_gains,
+                is_long_term=True
+            )
+            total_tax += realized_gains * lt_tax_rate
+        
+        return total_tax
+
+    def run_monte_carlo_simulation(self, is_roth=False, num_runs=5, num_simulations=200):
+        """Run Monte Carlo with consistent market returns between strategies"""
+        investment_years = self.calculate_investment_years()
+        all_results = []
+        all_trajectories = []
+        
+        # Pre-generate market returns for consistency
+        market_returns = np.random.normal(
+            loc=self.r_401k/12,
+            scale=self.passive_volatility/np.sqrt(12),
+            size=(num_runs, num_simulations, investment_years, 12)
+        )
+        
+        # Generate active trading excess returns if needed
+        if not is_roth:
+            active_excess = np.random.normal(
+                loc=(self.r_active - self.r_passive)/12,
+                scale=self.active_volatility/np.sqrt(12),
+                size=(num_runs, num_simulations, investment_years, 12)
+            )
+        
+        for run in range(num_runs):
+            run_trajectories = []
+            
+            for sim in range(num_simulations):
+                total_value = 0
+                annual_values = []
+                
+                for year in range(investment_years):
+                    year_total_value = total_value
+                    contribution = self.initial_investment * (1 + self.salary_growth)**year
+                    
+                    if is_roth:
+                        # Process Roth with market returns
+                        monthly_returns = market_returns[run, sim, year]
+                        for month in range(12):
+                            if year_total_value > 0:
+                                year_total_value *= (1 + monthly_returns[month] - self.f_passive/12)
+                            year_total_value += contribution/12
+                            
+                            match = self.calculate_employer_match(
+                                contribution/12,
+                                self.annual_income * (1 + self.salary_growth)**year / 12
+                            )
+                            if match > 0:
+                                year_total_value += match * (1 + monthly_returns[month] - self.f_passive/12)
+                    else:
+                        # Process self-managed with same market base plus active trading
+                        monthly_market = market_returns[run, sim, year]
+                        monthly_active = monthly_market + active_excess[run, sim, year]
+                        
+                        for month in range(12):
+                            passive_value = year_total_value * self.passive_ratio
+                            active_value = year_total_value * self.active_ratio
+                            
+                            if year_total_value > 0:
+                                # Apply appropriate fees to each portion
+                                passive_growth = passive_value * (1 + monthly_market[month] - self.f_passive/12)
+                                active_growth = active_value * (1 + monthly_active[month] - self.f_active/12)
+                                
+                                year_total_value = passive_growth + active_growth
+                            
+                            year_total_value += contribution/12
+                        
+                        # Apply annual tax impact
+                        if year_total_value > 0:
+                            passive_value = year_total_value * self.passive_ratio
+                            active_value = year_total_value * self.active_ratio
+                            
+                            # Calculate realized gains based on trading frequency
+                            passive_gains = passive_value * self.passive_trading_freq * np.mean(monthly_market)
+                            active_gains = active_value * self.active_trading_freq * np.mean(monthly_active)
+                            
+                            tax_impact = (
+                                self.calculate_investment_taxes(passive_value, passive_gains/passive_value, False) +
+                                self.calculate_investment_taxes(active_value, active_gains/active_value, True)
+                            )
+                            year_total_value -= tax_impact
+                    
+                    total_value = year_total_value
+                    real_value = total_value / (1 + self.inflation)**(year + 1)
+                    annual_values.append(real_value)
+                
+                run_trajectories.append(annual_values)
+            
+            run_trajectories = np.array(run_trajectories)
+            mean_trajectory = np.mean(run_trajectories, axis=0)
+            all_trajectories.append(mean_trajectory)
+            all_results.append(mean_trajectory[-1])
+            
+            if run % 1 == 0:
+                print(f"Completed run {run + 1}/{num_runs}")
+        
+        # Calculate final statistics
+        final_mean = np.mean(all_results)
+        final_std = np.std(all_results)
+        ci_lower = np.percentile(all_results, 5)
+        ci_upper = np.percentile(all_results, 95)
+        
+        print(f"\nFinal Results:")
+        print(f"Mean Value: ${final_mean:,.2f}")
+        print(f"Standard Deviation: ${final_std:,.2f}")
+        print(f"90% Confidence Interval: ${ci_lower:,.2f} to ${ci_upper:,.2f}")
+        
+        mean_trajectory = np.mean(all_trajectories, axis=0)
+        ci_lower_trajectory = np.percentile(all_trajectories, 5, axis=0)
+        ci_upper_trajectory = np.percentile(all_trajectories, 95, axis=0)
+        
+        return final_mean, mean_trajectory, (ci_lower_trajectory, ci_upper_trajectory)
+
+    def get_deterministic_results(self, is_roth=False):
+        """Calculate deterministic results using expected returns"""
+        investment_years = self.calculate_investment_years()
+        total_value = 0
+        annual_values = []
+        
+        # Use constant expected returns instead of market cycles
+        expected_return = self.r_401k  # Base market return for both strategies
+        
+        for year in range(investment_years):
+            year_total_value = total_value
+            contribution = self.initial_investment * (1 + self.salary_growth)**year
+            
+            if is_roth:
+                # Simple growth with fees
+                if year_total_value > 0:
+                    year_total_value *= (1 + expected_return - self.f_passive)
+                year_total_value += contribution
+                
+                # Add employer match
+                match = self.calculate_employer_match(
+                    contribution,
+                    self.annual_income * (1 + self.salary_growth)**year
+                )
+                if match > 0:
+                    year_total_value += match * (1 + expected_return - self.f_passive)
+            else:
+                # Split between passive and active
+                passive_value = year_total_value * self.passive_ratio
+                active_value = year_total_value * self.active_ratio
+                
+                if year_total_value > 0:
+                    # Passive portion (only annual fees)
+                    passive_growth = passive_value * (1 + expected_return - self.f_passive)
+                    
+                    # Active portion (additional return and fees)
+                    active_growth = active_value * (1 + expected_return + 
+                        (self.r_active - self.r_passive) - self.f_active)
+                    
+                    # Tax impact from trading
+                    passive_tax = self.calculate_investment_taxes(
+                        passive_value, 
+                        self.passive_trading_freq * expected_return,  # Only tax realized gains
+                        False
+                    )
+                    active_tax = self.calculate_investment_taxes(
+                        active_value,
+                        self.active_trading_freq * (expected_return + (self.r_active - self.r_passive)),
+                        True
+                    )
+                    
+                    year_total_value = passive_growth + active_growth - passive_tax - active_tax
+                
+                year_total_value += contribution
+            
+            total_value = year_total_value
+            real_value = total_value / (1 + self.inflation)**(year + 1)
+            annual_values.append(real_value)
+        
+        return total_value, annual_values
