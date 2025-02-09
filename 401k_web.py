@@ -2,8 +2,6 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from investment_model import InvestmentComparator
-import io
-import sys
 from state_tax import StateTaxManager
 
 def main():
@@ -349,24 +347,57 @@ def main():
         comparator.state_tax = state_info['max_rate']
         comparator.state_cg_tax = state_info['max_rate']
         
-        # Calculate returns and capture debug output
-        old_stdout = sys.stdout
-        debug_output = io.StringIO()
-        sys.stdout = debug_output
+        # Create a placeholder for simulation progress
+        progress_placeholder = st.empty()
+        
+        # Capture simulation output
+        with progress_placeholder.container():
+            roth_value, roth_annual, roth_contributions, roth_prob = comparator.calculate_roth_401k_returns()
+            self_value, self_annual, self_contributions, self_prob = comparator.calculate_self_investment_returns()
+        
+        # Clear the progress after completion
+        progress_placeholder.empty()
 
-        roth_value, roth_annual, roth_contributions, roth_prob = comparator.calculate_roth_401k_returns()
-        self_value, self_annual, self_contributions, self_prob = comparator.calculate_self_investment_returns()
-
-        # Restore stdout
-        sys.stdout = old_stdout
-
-        # Display debug information in expandable sections
+        # Display analysis sections
         st.subheader("Detailed Analysis")
 
         # Investment Calculations
         with st.expander("Investment Calculations"):
-            st.markdown("### Detailed Calculation Steps")
-            st.text(debug_output.getvalue())
+            st.markdown("""
+            ### Calculation Methodology
+            
+            **Market Regime Modeling**
+            - Bull Markets (60%): +15% avg return, 12% volatility
+            - Bear Markets (30%): -10% avg return, 25% volatility
+            - Crash Events (10%): -30% avg return, 40% volatility
+            
+            **Investment Returns**
+            - Base Market Return: {:.1f}% (S&P 500 historical average)
+            - Active Investment Return: {:.1f}% (with higher volatility)
+            - Passive Investment Return: {:.1f}% (index funds)
+            
+            **Fees and Costs**
+            - Roth 401k Fee: {:.2f}%
+            - Passive Investment Fee: {:.2f}%
+            - Active Investment Fee: {:.2f}%
+            
+            **Tax Treatment**
+            - Roth 401k: Tax-free growth
+            - Self-Managed:
+              - Passive portion: {:.1f}% annual turnover
+              - Active portion: {:.1f}% annual turnover
+              - State tax rate: {:.2f}%
+            """.format(
+                r_401k * 100,
+                active_return * 100,
+                passive_return * 100,
+                roth_fee * 100,
+                comparator.f_passive * 100,
+                comparator.f_active * 100,
+                comparator.passive_trading_freq * 100,
+                comparator.active_trading_freq * 100,
+                state_info['max_rate'] * 100
+            ))
             
             st.markdown("""
             **Key Tax Considerations**

@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from state_tax import StateTaxManager
 from scipy.stats import norm
+import streamlit as st
 
 class InvestmentComparator:
     def __init__(self):
@@ -598,44 +599,53 @@ class InvestmentComparator:
         
         return total_tax
 
-    def run_monte_carlo_simulation(self, is_roth=False, num_runs=5, num_simulations=200):
-        """Run Monte Carlo with consistent market returns between strategies"""
+    def run_monte_carlo_simulation(self, is_roth=False, num_runs=4, num_simulations=500):
+        """Run Monte Carlo with market regimes and consistent returns"""
         investment_years = self.calculate_investment_years()
         all_results = []
         all_trajectories = []
         
-        # Pre-generate market returns for consistency
-        market_returns = np.random.normal(
-            loc=self.r_401k/12,
-            scale=self.passive_volatility/np.sqrt(12),
-            size=(num_runs, num_simulations, investment_years, 12)
-        )
-        
-        # Generate active trading excess returns if needed
-        if not is_roth:
-            active_excess = np.random.normal(
-                loc=(self.r_active - self.r_passive)/12,
-                scale=self.active_volatility/np.sqrt(12),
-                size=(num_runs, num_simulations, investment_years, 12)
-            )
+        # Use st.write for real-time updates
+        st.write(f"\nRunning {num_runs} sets of {num_simulations} simulations...")
         
         for run in range(num_runs):
             run_trajectories = []
             
             for sim in range(num_simulations):
+                # Generate market cycles for entire simulation period
+                market_cycles = self.simulate_market_cycles(investment_years)
                 total_value = 0
                 annual_values = []
                 
                 for year in range(investment_years):
+                    # Find current market regime
+                    cycle = next(c for c in market_cycles if 
+                               c['start_year'] <= year < c['start_year'] + c['duration'])
+                    regime_data = cycle['params']
+                    
+                    # Generate monthly returns based on regime
+                    monthly_market = np.random.normal(
+                        loc=regime_data['mean_return']/12,
+                        scale=regime_data['std_dev']/np.sqrt(12),
+                        size=12
+                    )
+                    
+                    # Generate active returns with higher volatility in each regime
+                    if not is_roth:
+                        monthly_active = np.random.normal(
+                            loc=(regime_data['mean_return'] + (self.r_active - self.r_passive))/12,
+                            scale=regime_data['std_dev']*1.5/np.sqrt(12),
+                            size=12
+                        )
+                    
                     year_total_value = total_value
                     contribution = self.initial_investment * (1 + self.salary_growth)**year
                     
                     if is_roth:
-                        # Process Roth with market returns
-                        monthly_returns = market_returns[run, sim, year]
+                        # Process Roth with regime-based returns
                         for month in range(12):
                             if year_total_value > 0:
-                                year_total_value *= (1 + monthly_returns[month] - self.f_passive/12)
+                                year_total_value *= (1 + monthly_market[month] - self.f_passive/12)
                             year_total_value += contribution/12
                             
                             match = self.calculate_employer_match(
@@ -643,21 +653,16 @@ class InvestmentComparator:
                                 self.annual_income * (1 + self.salary_growth)**year / 12
                             )
                             if match > 0:
-                                year_total_value += match * (1 + monthly_returns[month] - self.f_passive/12)
+                                year_total_value += match * (1 + monthly_market[month] - self.f_passive/12)
                     else:
-                        # Process self-managed with same market base plus active trading
-                        monthly_market = market_returns[run, sim, year]
-                        monthly_active = monthly_market + active_excess[run, sim, year]
-                        
+                        # Process self-managed with regime-based returns
                         for month in range(12):
                             passive_value = year_total_value * self.passive_ratio
                             active_value = year_total_value * self.active_ratio
                             
                             if year_total_value > 0:
-                                # Apply appropriate fees to each portion
                                 passive_growth = passive_value * (1 + monthly_market[month] - self.f_passive/12)
                                 active_growth = active_value * (1 + monthly_active[month] - self.f_active/12)
-                                
                                 year_total_value = passive_growth + active_growth
                             
                             year_total_value += contribution/12
@@ -667,7 +672,7 @@ class InvestmentComparator:
                             passive_value = year_total_value * self.passive_ratio
                             active_value = year_total_value * self.active_ratio
                             
-                            # Calculate realized gains based on trading frequency
+                            # Calculate realized gains based on regime-appropriate returns
                             passive_gains = passive_value * self.passive_trading_freq * np.mean(monthly_market)
                             active_gains = active_value * self.active_trading_freq * np.mean(monthly_active)
                             
@@ -683,13 +688,15 @@ class InvestmentComparator:
                 
                 run_trajectories.append(annual_values)
             
+            # Process run statistics
             run_trajectories = np.array(run_trajectories)
             mean_trajectory = np.mean(run_trajectories, axis=0)
             all_trajectories.append(mean_trajectory)
             all_results.append(mean_trajectory[-1])
             
-            if run % 1 == 0:
-                print(f"Completed run {run + 1}/{num_runs}")
+            # Update progress
+            progress = (run * num_simulations + sim) / (num_runs * num_simulations)
+            st.progress(progress)
         
         # Calculate final statistics
         final_mean = np.mean(all_results)
@@ -697,10 +704,10 @@ class InvestmentComparator:
         ci_lower = np.percentile(all_results, 5)
         ci_upper = np.percentile(all_results, 95)
         
-        print(f"\nFinal Results:")
-        print(f"Mean Value: ${final_mean:,.2f}")
-        print(f"Standard Deviation: ${final_std:,.2f}")
-        print(f"90% Confidence Interval: ${ci_lower:,.2f} to ${ci_upper:,.2f}")
+        st.write(f"\nFinal Results:")
+        st.write(f"Mean Value: ${final_mean:,.2f}")
+        st.write(f"Standard Deviation: ${final_std:,.2f}")
+        st.write(f"90% Confidence Interval: ${ci_lower:,.2f} to ${ci_upper:,.2f}")
         
         mean_trajectory = np.mean(all_trajectories, axis=0)
         ci_lower_trajectory = np.percentile(all_trajectories, 5, axis=0)
