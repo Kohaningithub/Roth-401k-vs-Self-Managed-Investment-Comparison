@@ -3,622 +3,667 @@ import numpy as np
 import matplotlib.pyplot as plt
 from investment_model import InvestmentComparator
 from state_tax import StateTaxManager
+import os
+import pandas as pd
+from datetime import datetime
+import json
+import uuid
+from pathlib import Path
+
+def get_contribution_limits(age, annual_income):
+    """Calculate all contribution limits based on 2025 rules"""
+    # Employee contribution limits
+    base_limit = 23500  # 2025 base limit
+    if age >= 60 and age <= 63:
+        catch_up = 11250
+        total_limit = 81250
+    elif age >= 50:
+        catch_up = 7500
+        total_limit = 77500
+    else:
+        catch_up = 0
+        total_limit = 70000
+    
+    employee_limit = base_limit + catch_up
+    
+    # Calculate percentage limits for employee contribution
+    max_employee_pct = min(100.0, (employee_limit / annual_income) * 100)
+    
+    return {
+        'employee_limit': employee_limit,
+        'total_limit': total_limit,
+        'max_employee_pct': max_employee_pct
+    }
+
+def calculate_match_limit(total_limit, employee_contribution, annual_income, employer_match_pct):
+    """Calculate maximum matchable percentage based on remaining room"""
+    # Calculate remaining room for employer contributions
+    employee_dollar_contribution = annual_income * (employee_contribution/100)
+    remaining_contribution_room = total_limit - employee_dollar_contribution
+    
+    # Convert to matchable percentage (considering employer match rate)
+    max_match_limit = (remaining_contribution_room / annual_income) * 100
+    max_match_limit = max_match_limit * (100 / employer_match_pct) if employer_match_pct > 0 else 0
+    
+    return max_match_limit
+
+def get_match_help_text(current_age, annual_income, employer_match, max_match, total_limit):
+    """Generate help text for match limit input"""
+    return (
+        f"The maximum percentage of your salary that can be matched. Example: If they 'match up to 6% of your salary', enter 6. \n\n"
+        f"Note: Due to 2025 IRS limits: \n"
+        f"• Total contributions (employee + employer) cannot exceed: \n"
+        f"  - Age < 50: $70,000 \n"
+        f"  - Age 50-59: $77,500 \n"
+        f"  - Age 60-63: $81,250 \n\n"
+        f"Your Situation: \n"
+        f"Age: {current_age} \n"
+        f"Income: ${annual_income:,.0f} \n"
+        f"Employer Match: {employer_match}% \n"
+        f"Maximum matchable percentage: {max_match:.1f}% (based on IRS limits)"
+    )
+
+def save_user_inputs(inputs_dict):
+    """Save user inputs to a JSON file with timestamp"""
+    try:
+        # Create data directory if it doesn't exist
+        data_dir = os.path.join(os.path.dirname(__file__), 'data')
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Generate unique filename using timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = os.path.join(data_dir, f'user_inputs_{timestamp}.json')
+        
+        # Add timestamp to inputs
+        inputs_dict["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Save to JSON file
+        with open(filename, 'w') as f:
+            json.dump(inputs_dict, f, indent=4)
+        
+        return True
+    except Exception as e:
+        st.error(f"Error saving inputs: {str(e)}")
+        return False
+
+def get_or_create_user_id():
+    """Get existing user ID from browser storage or create new one"""
+    # Check if user_id exists in query parameters (for returning users)
+    if 'user_id' in st.query_params:
+        user_id = st.query_params['user_id']
+        st.session_state.user_id = user_id
+        return user_id
+    
+    # If not in query params, check session state
+    if 'user_id' not in st.session_state:
+        # Generate new user ID
+        new_user_id = str(uuid.uuid4())
+        st.session_state.user_id = new_user_id
+        # Add user_id to URL for future visits
+        st.query_params['user_id'] = new_user_id
+    
+    return st.session_state.user_id
+
+def log_user_inputs_to_csv(inputs_dict, user_id):
+    """Log all user inputs to a single CSV file with user ID"""
+    try:
+        # Create data directory if it doesn't exist
+        data_dir = Path(__file__).parent / 'data'
+        data_dir.mkdir(exist_ok=True)
+        
+        # Use a single CSV file for all inputs
+        csv_path = data_dir / 'all_user_inputs.csv'
+        
+        # Add user_id to flat_data
+        flat_data = {
+            'user_id': user_id,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'current_age': inputs_dict['Basic Parameters']['Current Age'],
+            'annual_income': inputs_dict['Basic Parameters']['Annual Income'],
+            'state': inputs_dict['Basic Parameters']['State'],
+            'retirement_age': inputs_dict['Basic Parameters']['Retirement Age'],
+            'roth_contribution': inputs_dict['Basic Parameters']['Roth Contribution'].rstrip('%'),
+            'employer_match': inputs_dict['Basic Parameters']['Employer Match'].rstrip('%'),
+            'match_limit': inputs_dict['Basic Parameters']['Match Limit'].rstrip('%'),
+            'inflation_rate': inputs_dict['Market Assumptions']['Inflation Rate'].rstrip('%'),
+            'salary_growth': inputs_dict['Market Assumptions']['Salary Growth'].rstrip('%'),
+            '401k_return': inputs_dict['Market Assumptions']['401k Return'].rstrip('%'),
+            'active_return': inputs_dict['Market Assumptions']['Active Return'].rstrip('%'),
+            'passive_return': inputs_dict['Market Assumptions']['Passive Return'].rstrip('%'),
+            'roth_value': inputs_dict['Results']['Roth 401k Value'].lstrip('$').replace(',', ''),
+            'self_managed_value': inputs_dict['Results']['Self-Managed Value'].lstrip('$').replace(',', ''),
+            'difference': inputs_dict['Results']['Difference'].rstrip('%')
+        }
+        
+        df_new = pd.DataFrame([flat_data])
+        
+        try:
+            df_existing = pd.read_csv(csv_path)
+            df_updated = pd.concat([df_existing, df_new], ignore_index=True)
+        except FileNotFoundError:
+            df_updated = df_new
+        
+        df_updated.to_csv(csv_path, index=False)
+        
+    except Exception as e:
+        print(f"Error logging inputs: {str(e)}")
+
+def show_user_history(user_id):
+    """Display previous calculations for the current user"""
+    try:
+        data_dir = Path(__file__).parent / 'data'
+        csv_path = data_dir / 'all_user_inputs.csv'
+        
+        if not csv_path.exists():
+            return
+        
+        df = pd.read_csv(csv_path)
+        user_history = df[df['user_id'] == user_id].sort_values('timestamp', ascending=False)
+        
+        if len(user_history) == 0:
+            return
+        
+        for i, row in user_history.iterrows():
+            with st.expander(f"Calculation {len(user_history)-i}: {row['timestamp']}"):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("**Basic Parameters**")
+                    st.write(f"Age: {row['current_age']}")
+                    st.write(f"Income: ${float(row['annual_income']):,.0f}")
+                    st.write(f"State: {row['state']}")
+                    st.write(f"Retirement Age: {row['retirement_age']}")
+                    st.write(f"Roth Contribution: {row['roth_contribution']}%")
+                    st.write(f"Employer Match: {row['employer_match']}%")
+                    st.write(f"Match Limit: {row['match_limit']}%")
+                
+                with col2:
+                    st.markdown("**Market Assumptions**")
+                    st.write(f"Inflation Rate: {row['inflation_rate']}%")
+                    st.write(f"Salary Growth: {row['salary_growth']}%")
+                    st.write(f"401k Return: {row['401k_return']}%")
+                    st.write(f"Active Return: {row['active_return']}%")
+                    st.write(f"Passive Return: {row['passive_return']}%")
+                
+                with col3:
+                    st.markdown("**Results**")
+                    st.metric("Roth 401k", f"${float(row['roth_value']):,.2f}")
+                    st.metric("Self-Managed", f"${float(row['self_managed_value']):,.2f}")
+                    st.metric("Difference", f"{row['difference']}")
+        
+        if len(user_history) > 0:
+            if st.button("Clear History", key="clear_history_button"):
+                df_updated = df[df['user_id'] != user_id]
+                df_updated.to_csv(csv_path, index=False)
+                st.success("Your calculation history has been cleared!")
+                st.rerun()
+            
+    except Exception as e:
+        st.error(f"Error loading history: {str(e)}")
+
+def has_previous_calculations(user_id):
+    """Check if user has any previous calculations"""
+    try:
+        data_dir = Path(__file__).parent / 'data'
+        csv_path = data_dir / 'all_user_inputs.csv'
+        
+        if not csv_path.exists():
+            return False
+        
+        df = pd.read_csv(csv_path)
+        user_history = df[df['user_id'] == user_id]
+        
+        return len(user_history) > 0
+    except Exception:
+        return False
 
 def main():
-    st.markdown("<h1 style='white-space: nowrap;'>Roth 401k vs Self-Managed Comparison</h1>", unsafe_allow_html=True)
+    # Get or create persistent user ID
+    user_id = get_or_create_user_id()
     
+    # Initialize session state for calculation results
+    if 'roth_value' not in st.session_state:
+        st.session_state.roth_value = None
+        st.session_state.roth_annual = None
+        st.session_state.roth_prob = None
+        st.session_state.self_value = None
+        st.session_state.self_annual = None
+        st.session_state.self_prob = None
+        st.session_state.difference_value = None
+
+    # Initialize managers
+    state_manager = StateTaxManager()
+    
+    st.markdown("<h1 style='text-align: center;'>Roth 401(k) vs. Self-Managed Investing: Which Is Right for You?</h1>", unsafe_allow_html=True)
+    # Update the introduction section with a table
     st.markdown("""
-    ### What This Tool Compares
-    This calculator compares two investment strategies, assuming the same initial contribution amount for both:
-    1. **Roth 401k**: Contributing to a tax-advantaged retirement account where:
-       - Contributions are made with after-tax dollars
-       - All growth is tax-free
-       - Withdrawals in retirement are tax-free
-       - Early withdrawals before 59½:
-         - Contributions can be withdrawn tax- and penalty-free
-         - Earnings may be subject to income tax + 10% penalty, unless an exception applies
-       
-    2. **Self-Managed Portfolio**: Keeping the money and investing it yourself where:
-       - You manage a mix of passive and active investments
-       - You pay capital gains taxes on profits
-       - You have more flexibility but face tax implications
-    """)
+    <style>
+        .comparison-header {
+            text-align: center;
+            color: #0f4c81;
+            padding: 0em 0;
+            margin-bottom: 0em;
+        }
+        .feature-table {
+            margin: 0;
+            padding: 0;
+        }
+        .feature-header {
+            background-color: #f0f2f6;
+            font-weight: bold;
+        }
+        .feature-row:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        .stMarkdown {
+            margin-bottom: 0em;
+        }
+        div[data-testid="stTable"] {
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    st.markdown("This calculator helps you compare two investment strategies, both using the same after-tax contribution amount:")
 
-    # Left column for inputs, right column for results
-    col1, col2 = st.columns([2, 3])
-    
-    with col1:
-        st.header("Parameters")
+    st.markdown("<h3 class='comparison-header'>Investment Strategy Comparison</h3>", unsafe_allow_html=True)
 
-        st.subheader("Your Information")
-        # Helper functions at the top
+    # Create comparison table with improved structure
+    comparison_data = {
+        "Feature": [
+            "💰 Contributions",
+            "📈 Growth & Withdrawals",
+            "🤝 Employer Benefits",
+            "🎯 Investment Options",
+            "🎮 Investment Control",
+            "💵 Liquidity",
+            "📊 Annual Limits (2025)",
+            "⚡ Early Withdrawal"
+        ],
+        "Roth 401(k)": [
+            "After-tax dollars",
+            "Tax-free",
+            "✅ Employer match available",
+            "Limited (plan-specific funds)",
+            "Limited to plan options",
+            "Limited until retirement",
+            "$23,500 + catch-up (varies by age)",
+            "10% penalty + restrictions"
+        ],
+        "Self-Managed Portfolio": [
+            "After-tax dollars",
+            "Subject to capital gains tax",
+            "❌ No employer match",
+            "Unlimited (stocks, ETFs, etc.)",
+            "Full control",
+            "Fully liquid",
+            "No contribution limits",
+            "Available anytime"
+        ]
+    }
+
+    df = pd.DataFrame(comparison_data)
+    st.markdown('<div class="feature-table">', unsafe_allow_html=True)
+    st.table(df.set_index('Feature').style
+            .set_properties(**{
+                'background-color': '#f0f2f6',
+                'border': '1px solid #e1e4e8',
+                'padding': '5px',
+                'text-align': 'left'
+            })
+            .set_table_styles([
+                {'selector': 'th', 'props': [('background-color', '#0f4c81'), 
+                                           ('color', 'white'),
+                                           ('font-weight', 'bold'),
+                                           ('padding', '5px')]},
+                {'selector': 'td', 'props': [('padding', '5px')]}
+            ]))
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Update the help text styling to be closer to the table
+    st.markdown("""
+    <div style='background-color: #f8f9fa; padding: 0em; border-radius: 5px; margin-top: 0em;'>
+        <p style='margin: 0;'><em>💡 Hover over ⓘ icons next to parameters for detailed explanations.</em></p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Create tabs for main interface, history, and methodology
+    tab_main, tab_history, tab_methodology = st.tabs(["Investment Calculator", "Calculation History", "Model Methodology"])
+
+    with tab_main:
+        # Essential Parameters Section
+        st.subheader("Essential Parameters")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            current_age = st.number_input(
+                "Current Age", 
+                value=22, 
+                min_value=18, 
+                max_value=65,
+                help="Your current age"
+            )
+            annual_income = st.number_input(
+                "Pre-tax Annual Income ($)", 
+                value=100000, 
+                min_value=0,
+                help="Your current pre-tax annual income"
+            )
+            selected_state = st.selectbox(
+                "Select Your State",
+                options=state_manager.get_state_list(),
+                help="Your state of residence for tax calculations. Different states have different tax treatments for investments."
+            )
+        
+        # Calculate Roth limits
         def get_roth_limit(age):
             base_limit = 23500  # 2025 base limit
             if age >= 60 and age <= 63:
-                catch_up = 11250  # Special catch-up for ages 60-63
+                catch_up = 11250
             elif age >= 50:
-                catch_up = 7500   # Regular catch-up for 50+
+                catch_up = 7500
             else:
                 catch_up = 0
             return base_limit + catch_up
 
-        def get_total_limit(age):
-            if age >= 60 and age <= 63:
-                return 81250  # Special catch-up
-            elif age >= 50:
-                return 77500  # Regular catch-up
-            return 70000     # Standard limit
+        roth_limit = get_roth_limit(current_age)
+        max_percent = min(100.0, (roth_limit / annual_income) * 100)
+        suggested_value = min(10.0, max_percent/2)
+        
+        with col2:
+            retirement_age = st.number_input(
+                "Retirement Age", 
+                value=65, 
+                min_value=current_age + 1,
+                help="Your planned retirement age"
+            )
 
-        def calculate_max_employer_match(annual_income, age):
-            """Calculate maximum allowed employer match percentage based on limits"""
-            # Get employee and total contribution limits
-            employee_limit = get_roth_limit(age)
-            total_limit = get_total_limit(age)
-            
-            # Maximum employer contribution allowed
-            max_employer_contribution = min(
-                total_limit - employee_limit,  # Limited by total contribution cap
-                annual_income  # Cannot exceed 100% of salary
+            limits = get_contribution_limits(current_age, annual_income)
+            roth_contribution_pct = st.slider(
+                "Roth 401k Contribution (%)", 
+                0.0, 
+                limits['max_employee_pct'], 
+                suggested_value,
+                help=f"Your maximum contribution: ${limits['employee_limit']:,.0f}/year ({limits['max_employee_pct']:.1f}% of income based on 2025 rules)"
+            )
+            inflation_rate = st.number_input(
+                "Inflation Rate (%)",
+                value=3.0,
+                min_value=0.0,
+                max_value=10.0,
+                help="Expected annual inflation rate. Historical average is around 3%. This affects the real (inflation-adjusted) value of your investments."
+            )
+        
+        # Calculate maximum employer match based on 2025 rules
+        max_match_percent = 100.0  # Maximum match rate is 100% (dollar-for-dollar)
+        max_match_limit = 15.0     # Maximum matchable percentage of salary (2025 rule)
+
+        with col3:
+            employer_match = st.number_input(
+                "Employer Match Percentage", 
+                value=50.0,
+                min_value=0.0,
+                max_value=100.0,
+                help="How much your employer matches per dollar you contribute. Example: If they give 50¢ for each dollar you contribute, enter 50. If they match each dollar one-for-one, enter 100."
             )
             
-            # Convert to percentage of salary
-            max_match_percent = (max_employer_contribution / annual_income) * 100
+            max_match = calculate_match_limit(
+                limits['total_limit'], 
+                roth_contribution_pct, 
+                annual_income, 
+                employer_match
+            )
             
-            return min(100.0, max_match_percent)  # Cap at 100% for safety
+            match_limit = st.number_input(
+                "Maximum Matchable Salary %", 
+                value=min(6.0, max_match),
+                min_value=0.0,
+                max_value=max_match,
+                help=get_match_help_text(
+                    current_age, 
+                    annual_income, 
+                    employer_match, 
+                    max_match,
+                    limits['total_limit']
+                )
+            )
 
-        # Get user inputs
-        current_age = st.number_input(
-            "Current Age", 
-            value=22, 
-            min_value=18, 
-            max_value=65,
-            help="Your current age"
-        )
+            if match_limit > max_match:
+                st.warning(f"⚠️ Match limit exceeds 2025 maximum of {max_match}%")
 
-        retirement_age = st.number_input(
-            "Retirement Age", 
-            value=65, 
-            min_value=current_age + 1,
-            help="Your planned retirement age"
-        )
-        
-        annual_income = st.number_input(
-            "Current Pre-Tax Annual Income ($)", 
-            min_value=0, 
-            value=100000,
-            help="Your current pre-tax annual income, will be subjected to different tax brackets"
-        )
+            salary_growth = st.number_input(
+                "Annual Salary Growth (%)",
+                value=4.0,
+                min_value=0.0,
+                max_value=15.0,
+                help="Expected annual increase in your salary. Typically ranges from 2-5% for cost of living adjustments, potentially higher for career growth."
+            )
 
-        # Now we can calculate the employer match limits
-        max_match_percent = calculate_max_employer_match(annual_income, current_age)
-
-        roth_limit = get_roth_limit(current_age)
-        
-        # Calculate maximum allowed percentage
-        max_percent = (roth_limit / annual_income) * 100
-        
-        # Adjust initial value to be more reasonable based on max
-        suggested_value = min(10, max_percent/2)  # Start at half of max or 10%, whichever is lower
-
-        roth_contribution_pct = st.slider(
-            "Roth 401k Contribution (%)", 
-            min_value=0.00,
-            max_value=float(max_percent),
-            value=float(suggested_value),
-            step=0.11,
-            help=f"""
-            2025 Roth 401(k) Contribution Limits:
-
-            • Under 50: $23,500/year
-
-            • Ages 50-59: $31,000/year (+$7,500 catch-up)
-
-            • Ages 60-63: $34,750/year (+$11,250 catch-up)
-
-            • Ages 64+: $31,000/year (+$7,500 catch-up)
-
-            Your maximum: ${roth_limit:,.0f}/year ({max_percent:.1f}% of your income)
-
-            Total contribution limits (employer + employee):
-
-            • Regular: $70,000
-
-            • Age 50+: $77,500
-
-            • Age 60-63: $81,250
-
-            Same contribution amount will be used for self-directed investment comparison.
-            """
-        ) / 100
-
-        # Calculate and display actual contribution amount
-        contribution_amount = annual_income * roth_contribution_pct
-        st.write(f"Annual contribution: ${contribution_amount:,.0f}")
-        
-        if contribution_amount > roth_limit:
-            st.error(f"⚠️ Contribution exceeds annual limit of ${roth_limit:,}!")
-            contribution_amount = roth_limit
-            roth_contribution_pct = roth_limit / annual_income
-            st.write(f"Adjusted to maximum allowed: ${roth_limit:,}")
-        
-        st.subheader("Roth 401k Investment Parameters")
-        roth_fee = st.number_input(
-            "Roth 401k Management Fee (%)", 
-            min_value=0.0,
-            max_value=2.0,
-            value=0.2,
-            step=0.1,
-            help="""
-            Total annual management and administration fees for Roth 401(k):
-
-            Check your Roth 401k statement for the exact fee.
-
-            • Typical range: 0.0% to 2.0% per year. 
-
-            • Zero fees: Some employers cover all costs
-
-            • Lower fees (0.3-0.5%): Common in large companies
-
-            • Higher fees (1-2%): More common in smaller plans
-            """
-        ) / 100
-        
-        # Update employer match input
-        employer_match = st.number_input(
-            "Employer Match (%)", 
-            min_value=0.0,
-            max_value=calculate_max_employer_match(annual_income, current_age),
-            value=min(3.0, calculate_max_employer_match(annual_income, current_age)),
-            step=0.1,
-            help=f"""
-            Employer matching contribution percentage:
-
-            • Common matches: 3-6%
-
-            • Maximum allowed: {calculate_max_employer_match(annual_income, current_age):.1f}%
-              (Based on your income ${annual_income:,.0f} and 2025 limits)
-            """
-        ) / 100
-
-        # Calculate actual employer contribution
-        employer_contribution = annual_income * employer_match
-
-        # Show warning if contribution would exceed limits
-        if employer_contribution > (get_total_limit(current_age) - get_roth_limit(current_age)):
-            st.error(f"""
-            ⚠️ Employer Match Exceeds Contribution Limits!
+        # Advanced Parameters (collapsible)
+        with st.expander("Adjust Advanced Parameters"):
+            col1, col2 = st.columns(2)
             
-            Current total: ${get_roth_limit(current_age) + employer_contribution:,.0f}
-            Maximum allowed: ${get_total_limit(current_age):,.0f}
-            """)
+            with col1:
+                st.markdown("### Investment Returns")
+                r_401k = st.number_input(
+                    "401k Return Rate (%)", 
+                    value=10.0,
+                    help="Expected annual return rate for your 401k investments. Default is based on historical S&P 500 returns."
+                )
+                active_self_managed = st.number_input(
+                    "Self-Managed Active Return Rate (%)", 
+                    value=12.0,
+                    help="Expected return rate for your actively managed investments. Usually higher than passive returns but with more risk and trading costs."
+                )
+                passive_self_managed = st.number_input(
+                    "Self-Managed Passive Return Rate (%)", 
+                    value=10.0,
+                    help="Expected return rate for your passive investments like index funds. Based on historical market returns."
+                )
             
-            if st.button("Adjust to Maximum Allowed"):
-                max_match = (get_total_limit(current_age) - get_roth_limit(current_age)) / annual_income
-                st.session_state.employer_match = max_match
-                st.experimental_rerun()
-        
-        match_limit = st.number_input(
-            "Match Limit (% of Salary)", 
-            min_value=0.0,
-            max_value=100.0,
-            value=6.0,
-            step=0.5,
-            help="""
-            Check your plan for the maximum salary percentage eligible for employer match:
+            with col2:
+                st.markdown("### Portfolio Structure")
+                passive_ratio = st.slider(
+                    "Passive Investment Ratio (%)", 
+                    0, 100, 80,
+                    help="Percentage of self-managed portfolio allocated to passive investments like index funds. Default is 80% passive, 20% active."
+                )
+                active_trading_freq = st.number_input(
+                    "Portfolio Turnover Rate (%)", 
+                    value=30.0,
+                    help="How often you trade your active investments annually. Higher turnover means more taxable events."
+                )
+                roth_fee = st.number_input(
+                    "Roth 401k Fee (%)", 
+                    value=0.2,
+                    help="Annual management fee for your Roth 401k investments. Check your plan documents for exact fee structure."
+                )
 
-            • Example: 6% means employer matches up to 6% of your salary
-            """
-        ) / 100
-
-        r_401k = st.number_input(
-            "401k Return Rate (%)", 
-            value=10.0,
-            help="Adjust with your product portfolio return rate. 10% is S&P 500 historical average (The model will adjust for inflation)"
-        ) / 100
-        
-        st.subheader("Self-Managed Investment Parameters")
-
-        active_return = st.number_input(
-            "Active Investment Return Rate (%)", 
-            min_value=0, 
-            max_value=100, 
-            value=12,
-            help="Investments that involve frequent buying and selling (e.g., individual stocks, options, hedge funds). The model will adjust for inflation and volatility."
-        ) / 100
-        
-        passive_ratio = st.slider(
-            "Passive Investment Ratio (%)", 
-            0, 100, 80,
-            help="Percentage allocated to passive investments like index funds"
-        ) / 100
-        
-        passive_return = st.number_input(
-            "Passive Return Rate (%)", 
-            value=10.0,
-            help="Adjust with your product portfolio return rate. 10% is S&P 500 historical average (The model will adjust for inflation)"
-        ) / 100
-        
-        
-        active_trading_freq = st.number_input(
-            "Portfolio Turnover Rate (%)", 
-            min_value=0.0,
-            max_value=100.0,
-            value=30.0,
-            step=5.0,
-            help="""
-            How often you trade your active investments per year:
-
-            • Trading frequency = Portfolio turnover rate
-
-            • Example: 30% means you replace 30% of holdings annually
-            
-            Typical ranges:
-
-            • Buy & hold: 0-20% turnover
-
-            • Moderate trading: 20-50%
-
-            • Active trading: 50-100%
-            
-            Higher turnover → More short-term capital gains tax
-            """
-        ) / 100
-        
-        st.subheader("Economic Factors")
-        inflation = st.number_input(
-            "Inflation Rate (%)", 
-            value=3.0,
-            help="3% is default annual inflation rate"
-        ) / 100
-        
-        salary_growth = st.number_input(
-            "Annual Salary Growth (%)", 
-            value=4.0,
-            help="Expected annual salary increase"
-        ) / 100
-
-        st.subheader("Tax Parameters")
-        # Initialize state tax manager
-        state_manager = StateTaxManager()
-        states = state_manager.get_state_list()
-
-        selected_state = st.selectbox(
-            "Select Your State",
-            states,
-            index=states.index("California"),  # Default to California
-            help="""
-            Select your state of residence for tax calculations:
-
-            • State income tax rates vary from 0% to 13.3%
-            • Tax brackets vary by state
-            • Some states have no income tax
-            """
-        )
-
-        # Get state info
-        state_info = state_manager.get_state_info(selected_state)
-
-        # Display state tax info
-        st.info(f"""
-        **{selected_state} Tax Information**
-        • {'Has' if state_info['has_income_tax'] else 'No'} state income tax
-        • Maximum rate: {state_info['max_rate']:.2%}
-        • Number of brackets: {state_info['num_brackets']}
-        • Standard deduction: ${state_info['standard_deduction']:,.0f}
-        """)
-
-        # Add marriage status note
-        st.warning("""
-        **Note on Marriage Status:**
-        This model uses single filer tax rates for simplicity. Marriage status can affect:
-
-        • Tax brackets
-
-        • Standard deductions
-
-        • Personal exemptions
-
-        Consider consulting a tax professional for your specific situation.
-        """)
-
-    # Right column for results
-    with col2:
-        st.header("Results")
-
-        # Create investment comparator with user parameters
+        # Create investment comparator
         comparator = InvestmentComparator()
         
-        # Update all parameters
-        comparator.current_age = current_age
-        comparator.retirement_age = retirement_age
-        comparator.initial_investment = annual_income * roth_contribution_pct
-        comparator.annual_income = annual_income
-        comparator.salary_growth = salary_growth
-        comparator.r_active = active_return
-        comparator.passive_ratio = passive_ratio
-        comparator.active_ratio = 1 - passive_ratio
-        comparator.r_passive = passive_return
-        comparator.r_401k = r_401k
-        comparator.inflation = inflation
-        comparator.f_401k = roth_fee
-        comparator.employer_match = employer_match
-        comparator.match_limit = match_limit
-        comparator.active_trading_freq = active_trading_freq
+        # Update all parameters including state info
+        state_info = state_manager.get_state_info(selected_state)
         comparator.state_tax = state_info['max_rate']
         comparator.state_cg_tax = state_info['max_rate']
+        comparator.selected_state = selected_state
         
-        # Create a placeholder for simulation progress
-        progress_placeholder = st.empty()
+        # Update other parameters
+        comparator.current_age = current_age
+        comparator.retirement_age = retirement_age
+        comparator.annual_income = annual_income
+        comparator.initial_investment = annual_income * (roth_contribution_pct/100)
+        comparator.employer_match = employer_match/100  # This is the match rate (50% = 0.5, 100% = 1.0)
+        comparator.match_limit = match_limit/100       # This is the salary percentage limit
+        comparator.inflation = inflation_rate/100
+        comparator.salary_growth = salary_growth/100
         
-        # Capture simulation output
-        with progress_placeholder.container():
-            roth_value, roth_annual, roth_contributions, roth_prob = comparator.calculate_roth_401k_returns()
-            self_value, self_annual, self_contributions, self_prob = comparator.calculate_self_investment_returns()
-        
-        # Clear the progress after completion
-        progress_placeholder.empty()
+        # Update advanced parameters if modified
+        comparator.r_401k = r_401k/100
+        comparator.r_active = active_self_managed/100
+        comparator.r_passive = passive_self_managed/100
+        comparator.passive_ratio = passive_ratio/100
+        comparator.active_ratio = 1 - (passive_ratio/100)
+        comparator.active_trading_freq = active_trading_freq/100
+        comparator.f_passive = roth_fee/100
 
-        # Display analysis sections
-        st.subheader("Detailed Analysis")
+        # Calculate button and results display
+        if st.button("Calculate Results", key="calculate_results_button"):
+            # Run calculations and store in session state
+            with st.spinner('*Running investment simulations (this may take a moment)...*'):
+                progress_placeholder = st.empty()
+                with progress_placeholder.container():
+                    st.session_state.roth_value, st.session_state.roth_annual, st.session_state.roth_contributions, st.session_state.roth_prob = comparator.calculate_roth_401k_returns()
+                    st.session_state.self_value, st.session_state.self_annual, st.session_state.self_contributions, st.session_state.self_prob = comparator.calculate_self_investment_returns()
+                progress_placeholder.empty()
+            
+            # Calculate and store difference value
+            difference_pct = ((st.session_state.self_value/st.session_state.roth_value)-1)*100
+            st.session_state.difference_value = f"{'+' if difference_pct > 0 else ''}{difference_pct:.1f}%"
+            
+            # Save inputs to CSV
+            inputs_dict = {
+                "Basic Parameters": {
+                    "Current Age": current_age,
+                    "Annual Income": annual_income,
+                    "State": selected_state,
+                    "Retirement Age": retirement_age,
+                    "Roth Contribution": f"{roth_contribution_pct}%",
+                    "Employer Match": f"{employer_match}%",
+                    "Match Limit": f"{match_limit}%"
+                },
+                "Market Assumptions": {
+                    "Inflation Rate": f"{inflation_rate}%",
+                    "Salary Growth": f"{salary_growth}%",
+                    "401k Return": f"{r_401k}%",
+                    "Active Return": f"{active_self_managed}%",
+                    "Passive Return": f"{passive_self_managed}%"
+                },
+                "Results": {
+                    "Roth 401k Value": f"${st.session_state.roth_value:,.2f}",
+                    "Self-Managed Value": f"${st.session_state.self_value:,.2f}",
+                    "Difference": st.session_state.difference_value
+                }
+            }
+            log_user_inputs_to_csv(inputs_dict, user_id)
+        
+        # Only show results if calculations exist
+        if st.session_state.roth_value is not None:
+            st.header("Investment Comparison Results")
+            
+            # Display metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Roth 401k Final Value", f"${st.session_state.roth_value:,.0f}")
+            with col2:
+                st.metric("Self-Managed Final Value", f"${st.session_state.self_value:,.0f}")
+            with col3:
+                st.metric("Difference", st.session_state.difference_value, 
+                         help="How much more/less the self-managed strategy returns compared to Roth 401k. A positive percentage means self-managed performs better.")
 
-        # Investment Calculations
-        with st.expander("Investment Calculations"):
+            # Show graph
+            st.subheader("Portfolio Value Projections")
+            with st.spinner('*Generating visualization...*'):
+                fig, ax = plt.subplots(figsize=(10, 6))
+                years = range(len(st.session_state.roth_annual))
+                
+                # Plot mean trajectories and confidence intervals
+                ax.plot(years, st.session_state.roth_prob[0], label='Roth 401k (Expected)', color='blue', linewidth=2)
+                ax.fill_between(years, st.session_state.roth_prob[1][0], st.session_state.roth_prob[1][1], alpha=0.2, color='blue', label='Roth 401k 90% CI')
+                
+                ax.plot(years, st.session_state.self_prob[0], label='Self-Managed (Expected)', color='orange', linewidth=2)
+                ax.fill_between(years, st.session_state.self_prob[1][0], st.session_state.self_prob[1][1], alpha=0.2, color='orange', label='Self-Managed 90% CI')
+                
+                ax.set_xlabel('Years')
+                ax.set_ylabel('Portfolio Value ($)')
+                ax.legend()
+                ax.grid(True)
+                ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+                st.pyplot(fig)
+
             st.markdown("""
-            ### Calculation Methodology
-            
-            **Market Regime Modeling**
-            - Bull Markets (60%): +15% avg return, 12% volatility
-            - Bear Markets (30%): -10% avg return, 25% volatility
-            - Crash Events (10%): -30% avg return, 40% volatility
-            
-            **Investment Returns**
-            - Base Market Return: {:.1f}% (S&P 500 historical average)
-            - Active Investment Return: {:.1f}% (with higher volatility)
-            - Passive Investment Return: {:.1f}% (index funds)
-            
-            **Fees and Costs**
-            - Roth 401k Fee: {:.2f}%
-            - Passive Investment Fee: {:.2f}%
-            - Active Investment Fee: {:.2f}%
-            
-            **Tax Treatment**
-            - Roth 401k: Tax-free growth
-            - Self-Managed:
-              - Passive portion: {:.1f}% annual turnover
-              - Active portion: {:.1f}% annual turnover
-              - State tax rate: {:.2f}%
-            """.format(
-                r_401k * 100,
-                active_return * 100,
-                passive_return * 100,
-                roth_fee * 100,
-                comparator.f_passive * 100,
-                comparator.f_active * 100,
-                comparator.passive_trading_freq * 100,
-                comparator.active_trading_freq * 100,
-                state_info['max_rate'] * 100
-            ))
-            
-            st.markdown("""
-            **Key Tax Considerations**
-            • Federal Income Tax: Progressive brackets from 10% to 37%
-            • Federal Capital Gains: 0%, 15%, or 20% based on income
-            • State Income Tax: Applied to contributions
-            • State Capital Gains: Applied to investment gains
-            
-            **Growth Assumptions**
-            • Salary Growth: Adjusted for inflation
-            • Investment Returns: Nominal returns adjusted for inflation
-            • Trading Costs: Includes commissions and tax impact
+            ### Understanding Your Results
+
+            **Portfolio Projections**
+            - Solid lines show the expected growth path for each strategy
+            - Shaded areas show where values are likely to fall based on 2,000 market simulations
+            - 90% confidence means there's a 90% chance your actual returns will fall within these ranges
+            - Wider ranges indicate higher uncertainty due to:
+              - Market volatility
+              - Active trading exposure
+              - Tax implications
+
+            **Key Differences Between Strategies**
+            - **Roth 401k**: More predictable due to tax-free growth and lower fees
+            - **Self-Managed**: 
+              - Higher potential returns but more uncertainty
+              - Affected by market timing and tax drag
+              - Active self-managed investments add both opportunity and risk
             """)
 
-        # Risk Analysis
-        with st.expander("Risk & Return Analysis"):
+            # Add age-based contribution info in results section
             st.markdown("""
-            ### Portfolio Risk Metrics
-            
-            **Roth 401k Strategy**
-            • Tax-free growth reduces uncertainty
-            • Employer match provides guaranteed return
-            • Limited investment options
-            • Early withdrawal penalties
-            
-            **Self-Managed Strategy**
-            • More investment flexibility
-            • Higher potential returns
-            • Tax implications on trades
-            • Market risk exposure
-            
-            **Tax Risk Considerations**
-            • Future tax rate uncertainty
-            • State tax policy changes
-            • Capital gains rate changes
-            • Alternative minimum tax (AMT)
+            ### Your Contribution Limits
             """)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"""
+                **Employee Contribution Limit**
+                - Base Limit: $23,500
+                - Age-Based Addition: ${limits['employee_limit'] - 23500:,.0f}
+                - Your Total Limit: ${limits['employee_limit']:,.0f}
+                """)
+            with col2:
+                st.markdown(f"""
+                **Combined Contribution Limit**
+                - Maximum Total: ${limits['total_limit']:,.0f}
+                - Includes: Employee + Employer Contributions
+                - Based on: Age {current_age}
+                """)
 
-        # Display key metrics
-        st.subheader("Final Values (Inflation Adjusted)")
-        col_metrics1, col_metrics2 = st.columns(2)
-        
-        with col_metrics1:
-            metric_label = "Roth 401k + Employer Match" if employer_match > 0 else "Roth 401k"
-            st.metric(
-                metric_label, 
-                f"${roth_value:,.0f}", 
-                help="""
-                Final portfolio value including:
+            # Add warning for high incomes where limits affect percentages
+            if max_match < 6.0:  # Standard match becoming limited
+                st.info(f"""
+                ℹ️ **Note on Contribution Limits**
+                Due to your income level (${annual_income:,.0f}), the maximum matchable percentage is limited to {max_match:.1f}% 
+                to stay within 2025 IRS limits of ${limits['total_limit']:,.0f} total contributions.
+                """)
 
-                • Roth 401k (tax-free growth & withdrawals)
+    with tab_history:
+        st.subheader("Compare Calculations")
+        if has_previous_calculations(user_id):
+            show_user_history(user_id)
+        else:
+            st.info("Make your first calculation to see your history here!")
 
-                """ + ("""
-                • Employer match (pre-tax, taxed at withdrawal)
-
-                """ if employer_match > 0 else "") + """
-                • Adjusted for inflation
-                """
-            )
-        
-        with col_metrics2:
-            st.metric(
-                "Self-managed", 
-                f"${self_value:,.0f}",
-                help="""
-                Final portfolio value including:
-
-                • Passive investments (index funds)
-
-                • Active investments
-
-                • After all taxes and fees
-
-                • Adjusted for inflation
-                """
-            )
-        
-        # Only show employer match metric if there is a match
-        if employer_match > 0:
-            st.metric(
-                "Total Employer Match Value", 
-                f"${roth_annual[-1] - roth_contributions:,.0f}",
-                help="""
-                Total value of employer matching contributions:
-
-                • Includes compound growth
-
-                • Pre-tax (will be taxed at withdrawal)
-
-                • Adjusted for inflation
-                """
-            )
-        
-        # Add overall comparison
-        st.metric(
-            "Strategy Difference", 
-            f"{((self_value/roth_value)-1)*100:.0f}%",
-            help="Percentage difference between self-managed and Roth 401k strategies. Positive means self-managed performed better."
-        )
-        
-        # Plot growth comparison
-        st.subheader("Investment Growth Comparison")
-
-        # Create two tabs
-        tab1, tab2 = st.tabs(["Expected Growth", "Growth with Uncertainty"])
-
-        with tab1:
-            # Plot deterministic results
-            fig1, ax1 = plt.subplots(figsize=(10, 6))
-            years = range(len(roth_annual))
-            ax1.plot(years, roth_annual, label='Roth 401k (Expected)', linewidth=2)
-            ax1.plot(years, self_annual, label='Self-managed (Expected)', linewidth=2)
-            ax1.set_xlabel('Years')
-            ax1.set_ylabel('Portfolio Value ($)')
-            ax1.legend()
-            ax1.grid(True)
-            ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-            st.pyplot(fig1)
-
-        with tab2:
-            # Plot probabilistic results with confidence intervals
-            fig2, ax2 = plt.subplots(figsize=(10, 6))
-            
-            # Plot mean trajectories
-            ax2.plot(years, roth_prob[0], label='Roth 401k (Mean)', linewidth=2)
-            ax2.plot(years, self_prob[0], label='Self-managed (Mean)', linewidth=2)
-            
-            # Add confidence intervals
-            ax2.fill_between(years, roth_prob[1][0], roth_prob[1][1], 
-                             alpha=0.2, label='Roth 401k 90% CI')
-            ax2.fill_between(years, self_prob[1][0], self_prob[1][1], 
-                             alpha=0.2, label='Self-managed 90% CI')
-            
-            ax2.set_xlabel('Years')
-            ax2.set_ylabel('Portfolio Value ($)')
-            ax2.legend()
-            ax2.grid(True)
-            ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-            st.pyplot(fig2)
-
-        # Add explanation
+    with tab_methodology:
         st.markdown("""
-        ### Understanding the Investment Comparison
-
-        **Base Market Returns**
-        - Both strategies experience the same underlying market movements
-        - The S&P 500 historical return (10%) is used as the baseline
-
-        **Key Differences**
-        1. **Roth 401k**
-           - Tax-free growth
-           - Simple fee structure
-           - Employer match benefit
-           - Limited investment options
-
-        2. **Self-Managed Portfolio**
-           - Passive portion (80%)
-             - Same market returns as Roth
-             - Lower fees
-             - Minimal tax impact (low turnover)
-           
-           - Active portion (20%)
-             - Potential for higher returns
-             - Higher fees and trading costs
-             - More tax impact (higher turnover)
-             - Greater volatility
-
-        **Risk Factors**
-        - Market risk affects both strategies equally
-        - Active trading adds additional volatility
-        - Tax implications vary with trading frequency
-        - Wider confidence intervals show higher uncertainty
-        """)
-
-        # Add confidence interval visualization
-        st.subheader("Portfolio Value Projections with Confidence Intervals")
-
-        # Create confidence interval plot
-        fig_ci, ax_ci = plt.subplots(figsize=(10, 6))
-
-        years = range(len(roth_annual))
-
-        # Plot Roth 401k
-        ax_ci.plot(years, roth_prob[0], label='Roth 401k Mean', color='blue', linewidth=2)
-        if employer_match > 0:
-            ax_ci.fill_between(
-                years, 
-                roth_prob[1][0], 
-                roth_prob[1][1], 
-                alpha=0.2, 
-                color='blue',
-                label='Roth 401k 90% CI'
-            )
-
-        # Plot Self-managed
-        ax_ci.plot(years, self_prob[0], label='Self-managed Mean', color='orange', linewidth=2)
-        ax_ci.fill_between(
-            years, 
-            self_prob[1][0], 
-            self_prob[1][1], 
-            alpha=0.2, 
-            color='orange',
-            label='Self-managed 90% CI'
-        )
-
-        # Format axes
-        ax_ci.set_xlabel('Years')
-        ax_ci.set_ylabel('Portfolio Value ($)')
-        ax_ci.legend()
-        ax_ci.grid(True)
-        ax_ci.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-
-        st.pyplot(fig_ci)
-
-        # Add explanation
-        st.markdown("""
-        ### Understanding the Confidence Intervals
-        The shaded areas show the range where portfolio values are likely to fall:
-        - **90% Confidence Interval**: There's a 90% chance your actual returns will fall within this range
-        - **Darker lines**: Show the expected (mean) trajectory
-        - **Wider intervals**: Indicate more uncertainty/risk in the investment strategy
+        ### Model Methodology and Assumptions
+        
+        **Market Modeling**
+        - Uses historical S&P 500 returns as baseline (10% average)
+        - Incorporates market regimes:
+          - Bull Markets: +15% return, 12% volatility
+          - Bear Markets: -10% return, 25% volatility
+          - Market Crashes: -30% return, 40% volatility
+        
+        **Investment Assumptions**
+        - Monthly compounding of returns
+        - Reinvestment of dividends
+        - Annual rebalancing of portfolio
+        - Inflation adjustment of 3% annually
+        
+        **Tax Treatment**
+        - Federal and state tax rates
+        - Long-term vs short-term capital gains
+        - Dividend taxation
+        - Trading frequency impact
+        
+        **Model Limitations**
+        - Cannot predict future market conditions
+        - Assumes consistent contribution patterns
+        - Does not account for behavioral factors
+        - Tax laws may change
         """)
 
 if __name__ == "__main__":

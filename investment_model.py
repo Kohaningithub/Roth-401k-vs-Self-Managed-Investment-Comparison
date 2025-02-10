@@ -543,18 +543,20 @@ class InvestmentComparator:
         
         return total_tax
 
-    def calculate_employer_match(self, contribution, salary):
-        """Calculate employer match with proper limits"""
-        # Calculate maximum matchable amount (e.g., 6% of salary)
-        max_matchable = salary * self.match_limit
+    def calculate_employer_match(self, contribution, current_salary):
+        """Calculate employer match based on contribution and limits"""
+        # contribution is the employee's contribution for this period
+        # current_salary is the salary for this period
         
-        # Calculate match on the lesser of:
-        # 1. Employee contribution
-        # 2. Maximum matchable amount
-        matchable_amount = min(contribution, max_matchable)
+        # Calculate the contribution as a percentage of salary
+        contribution_percent = contribution / current_salary
         
-        # Apply employer match percentage (e.g., 3%)
-        return matchable_amount * self.employer_match
+        # If contributing less than match limit, match the full contribution
+        if contribution_percent <= self.match_limit:
+            return contribution * self.employer_match
+        
+        # If contributing more than match limit, only match up to the limit
+        return (current_salary * self.match_limit) * self.employer_match
 
     def calculate_investment_taxes(self, value, gains, is_active=False):
         """Calculate investment taxes with proper treatment of gains"""
@@ -707,7 +709,9 @@ class InvestmentComparator:
         st.write(f"\nFinal Results:")
         st.write(f"Mean Value: ${final_mean:,.2f}")
         st.write(f"Standard Deviation: ${final_std:,.2f}")
-        st.write(f"90% Confidence Interval: ${ci_lower:,.2f} to ${ci_upper:,.2f}")
+        st.write(f"90% Confidence Interval:")
+        st.write(f"• Lower bound: ${ci_lower:,.2f}")
+        st.write(f"• Upper bound: ${ci_upper:,.2f}")
         
         mean_trajectory = np.mean(all_trajectories, axis=0)
         ci_lower_trajectory = np.percentile(all_trajectories, 5, axis=0)

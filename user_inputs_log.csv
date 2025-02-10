@@ -1,0 +1,2 @@
+timestamp,current_age,annual_income,state,retirement_age,roth_contribution,employer_match,match_limit,inflation_rate,salary_growth,401k_return,active_return,passive_return,roth_value,self_managed_value,difference
+2025-02-10 16:21:34,22,100000,Alabama,65,10.0,50.0,6.0,3.0,4.0,10.0,12.0,10.0,11530328.93,8734953.69,-24.2

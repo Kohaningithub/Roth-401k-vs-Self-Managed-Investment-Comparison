@@ -1,0 +1,27 @@
+[
+    {
+        "Basic Parameters": {
+            "Current Age": 22,
+            "Annual Income": 100000,
+            "State": "Alabama",
+            "Retirement Age": 65,
+            "Roth Contribution": "10.0%",
+            "Employer Match": "50.0%",
+            "Match Limit": "6.0%"
+        },
+        "Market Assumptions": {
+            "Inflation Rate": "3.0%",
+            "Salary Growth": "4.0%",
+            "401k Return": "10.0%",
+            "Active Return": "12.0%",
+            "Passive Return": "10.0%"
+        },
+        "Results": {
+            "Roth 401k Value": "$11,530,328.93",
+            "Self-Managed Value": "$8,734,953.69",
+            "Difference": "-24.2%"
+        },
+        "timestamp": "2025-02-10 16:18:22",
+        "user_id": "-6792693492612436582"
+    }
+]
